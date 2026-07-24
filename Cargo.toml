@@ -1,0 +1,64 @@
+[package]
+name = "parapet-guardrail"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Parapet Guardrail — flexible, client-configurable prompt injection detection API"
+
+[workspace]
+
+[[bin]]
+name = "parapet-guardrail"
+path = "src/main.rs"
+
+[dependencies]
+# Parapet core detection library
+parapet = { path = "../parapet" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP framework
+axum = { version = "0.8", features = ["macros"] }
+tower = { version = "0.5" }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database — SQLite (dev) + Postgres (prod)
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgres", "uuid", "chrono", "migrate"] }
+
+# UUID generation
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Env config
+dotenvy = "0.15"
+
+# Regex (for pattern compilation/validation)
+regex = "1"
+
+# HTTP client (for LLM calls from Rust layer)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Constant-time comparison (for API key check)
+subtle = "2"
+
+# Async trait
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"

@@ -1,0 +1,41 @@
+services:
+  guardrail-api:
+    build: .
+    ports:
+      - "9900:9900"
+    env_file: .env
+    environment:
+      - DATABASE_URL=sqlite:/app/data/guardrail.db
+      - MODELS_DIR=/app/models
+      - PARAPET_CONFIG=/app/parapet.yaml
+      - PYTHON_EXECUTABLE=python
+    volumes:
+      # Persistent model weight files (base + custom)
+      - ./models:/app/models
+      # SQLite database file (dev mode)
+      - guardrail-db:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+        required: false
+
+  postgres:
+    image: postgres:16-alpine
+    profiles: [prod]
+    environment:
+      POSTGRES_USER: guardrail
+      POSTGRES_PASSWORD: guardrail
+      POSTGRES_DB: guardrail
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guardrail"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  guardrail-db:
