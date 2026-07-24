@@ -26,7 +26,7 @@ use crate::api::{build_router, AppState};
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::engine::{EngineState, GuardrailEngine};
-use crate::engine::svm_base::BaseModelRegistry;
+use crate::engine::svm_base::{BaseModelRegistry, BASE_MODEL_NAMES};
 
 // ---------------------------------------------------------------------------
 // Main
@@ -94,15 +94,21 @@ async fn ensure_base_models(models_dir: &str, python_bin: &str) -> anyhow::Resul
     let base_dir = std::path::Path::new(models_dir).join("base");
     std::fs::create_dir_all(&base_dir)?;
 
-    let primary_model_path = base_dir.join("allrounder.weights.json");
-    if primary_model_path.exists() {
-        tracing::info!("Base model found in cache (allrounder.weights.json) — skipping training");
+    let missing: Vec<&str> = BASE_MODEL_NAMES
+        .iter()
+        .filter(|&&name| !base_dir.join(format!("{name}.weights.json")).exists())
+        .copied()
+        .collect();
+
+    if missing.is_empty() {
+        tracing::info!("All 9 base models found in cache — skipping training");
         return Ok(());
     }
 
     tracing::warn!(
+        missing = ?missing,
         python_bin = %python_bin,
-        "Missing base model (allrounder.weights.json) — running train_base_models.py (this may take a minute)"
+        "Missing base models — running train_base_models.py (this may take several minutes)"
     );
 
     let status = tokio::process::Command::new(python_bin)

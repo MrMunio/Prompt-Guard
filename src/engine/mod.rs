@@ -86,13 +86,9 @@ impl GuardrailEngine {
 
         // ── Base SVMs ────────────────────────────────────────────────────────
         let base_names = self.resolve_svm_base(&selector.svm_base);
-        let mut score_cache: std::collections::HashMap<usize, f32> =
-            std::collections::HashMap::new();
-
         for name in &base_names {
             if let Some(model) = self.base_models.get(name) {
-                let key = Arc::as_ptr(&model) as usize;
-                let score = *score_cache.entry(key).or_insert_with(|| model.score(text));
+                let score = model.score(text);
                 let verdict = if score >= 0.5 { VerdictValue::Block } else { VerdictValue::Allow };
                 if score > max_score { max_score = score; }
                 results.push(GuardrailResult {

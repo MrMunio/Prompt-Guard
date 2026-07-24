@@ -14,9 +14,8 @@
 //! }
 //! ```
 //!
-//! At startup, base models are loaded into memory. Alias mapping is supported so that
-//! categories without dedicated weight files share the single `allrounder` model instance,
-//! saving RAM and avoiding duplicate SVM matrix operations at runtime.
+//! At startup, all 9 base models are loaded into memory. Runtime scoring reuses
+//! the same n-gram extraction and dot-product logic from parapet's L1 layer.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -33,7 +32,6 @@ use crate::engine::scoring::{calibrate_score, extract_ngrams, score_ngrams, Ngra
 /// All valid base SVM category names. Order matters for display; "allrounder" is first.
 pub const BASE_MODEL_NAMES: &[&str] = &[
     "allrounder",
-    "allrounder_legacy",
     "instruction_override",
     "roleplay_jailbreak",
     "meta_probe",
@@ -119,57 +117,28 @@ impl BaseSvmModel {
 // Registry loaded at startup
 // ---------------------------------------------------------------------------
 
-/// Base models loaded into memory (with alias fallback to allrounder).
+/// All 9 base models loaded into memory.
 pub struct BaseModelRegistry {
     models: HashMap<String, Arc<BaseSvmModel>>,
 }
 
 impl BaseModelRegistry {
-    /// Load base models from `models_dir/base/`.
-    /// If specific category `.weights.json` files exist, they are loaded.
-    /// Otherwise, categories share the single `allrounder` model instance.
+    /// Load all base models from `models_dir/base/`.
     pub fn load(models_dir: &str) -> anyhow::Result<Self> {
         let base_dir = Path::new(models_dir).join("base");
         let mut models = HashMap::new();
 
-        // 1. Ensure at least allrounder.weights.json exists
-        let allrounder_path = base_dir.join("allrounder.weights.json");
-        if !allrounder_path.exists() {
-            anyhow::bail!(
-                "Base model file not found: {allrounder_path:?}. \
-                 Run 'python scripts/train_base_models.py' to generate base models."
-            );
-        }
-
-        let allrounder_model = Arc::new(BaseSvmModel::load("allrounder", &allrounder_path)?);
-        tracing::info!("base SVM model loaded: allrounder (shared generalist)");
-        models.insert("allrounder".to_string(), allrounder_model.clone());
-
-        // 2. Load allrounder_legacy (L1 sparse baseline) if present, else alias to allrounder
-        let legacy_path = base_dir.join("allrounder_legacy.weights.json");
-        if legacy_path.exists() {
-            let legacy_model = Arc::new(BaseSvmModel::load("allrounder_legacy", &legacy_path)?);
-            tracing::info!("base SVM model loaded: allrounder_legacy (L1 sparse baseline)");
-            models.insert("allrounder_legacy".to_string(), legacy_model);
-        } else {
-            tracing::info!(category = "allrounder_legacy", target = "allrounder", "aliasing allrounder_legacy to allrounder (weights file not found)");
-            models.insert("allrounder_legacy".to_string(), allrounder_model.clone());
-        }
-
-        // 3. Load remaining category-specific models or alias to allrounder
-        for &name in BASE_MODEL_NAMES {
-            if name == "allrounder" || name == "allrounder_legacy" {
-                continue;
-            }
+        for name in BASE_MODEL_NAMES {
             let path = base_dir.join(format!("{name}.weights.json"));
-            if path.exists() {
-                let model = BaseSvmModel::load(name, &path)?;
-                tracing::info!(model = name, "base SVM model loaded (dedicated)");
-                models.insert(name.to_string(), Arc::new(model));
-            } else {
-                tracing::info!(category = name, target = "allrounder", "aliasing category to allrounder");
-                models.insert(name.to_string(), allrounder_model.clone());
+            if !path.exists() {
+                anyhow::bail!(
+                    "Base model file not found: {path:?}. \
+                     Run 'python scripts/train_base_models.py' to generate base models."
+                );
             }
+            let model = BaseSvmModel::load(name, &path)?;
+            tracing::info!(model = name, "base SVM model loaded");
+            models.insert(name.to_string(), Arc::new(model));
         }
 
         Ok(Self { models })

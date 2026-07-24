@@ -25,11 +25,8 @@ MAX_CASES = 2000
 def main():
     token = os.environ.get("HF_TOKEN", "")
     if not token:
-        try:
-            from huggingface_hub import get_token
-            token = get_token()
-        except ImportError:
-            pass
+        from huggingface_hub import HfFolder
+        token = HfFolder.get_token()
     if not token:
         print("ERROR: hackaprompt dataset is gated. Set HF_TOKEN env var", file=sys.stderr)
         print("  or run `huggingface-cli login`.", file=sys.stderr)

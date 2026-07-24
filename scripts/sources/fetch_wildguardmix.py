@@ -30,13 +30,10 @@ SEED = 42
 def main():
     token = os.environ.get("HF_TOKEN", "")
     if not token:
-        try:
-            from huggingface_hub import get_token
-            token = get_token()
-        except ImportError:
-            pass
+        from huggingface_hub import HfFolder
+        token = HfFolder.get_token()
     if not token:
-        print("ERROR: wildguardmix is gated. Set HF_TOKEN environment variable.", file=sys.stderr)
+        print("ERROR: wildguardmix is gated. Set HF_TOKEN or run `huggingface-cli login`.", file=sys.stderr)
         sys.exit(1)
 
     print("Loading allenai/wildguardmix (wildguardtrain)...", file=sys.stderr)

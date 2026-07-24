@@ -162,7 +162,7 @@ pub async fn detect_handler(
         composite_score,
         normalization: l0_result.stats,
         results,
-    }).into_response())
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +191,7 @@ fn validate_selector(
     let svm_base = match &cfg.svm_base {
         SvmBaseInput::All(_) => SvmBaseSelector::All,
         SvmBaseInput::Categories(cats) => {
-            let invalid: Vec<_> = cats.iter().filter(|c| !is_valid_base_category(c.as_str())).collect();
+            let invalid: Vec<_> = cats.iter().filter(|c| !is_valid_base_category(c)).collect();
             if !invalid.is_empty() {
                 return Err(ApiError::bad_fields(
                     "Invalid svm_base category names",
@@ -212,7 +212,7 @@ fn validate_selector(
     let regex_base = match &cfg.regex_base {
         RegexBaseInput::All(_) => RegexBaseSelector::All,
         RegexBaseInput::Categories(cats) => {
-            let invalid: Vec<_> = cats.iter().filter(|c| !is_valid_base_category(c.as_str()) || c.as_str() == "allrounder").collect();
+            let invalid: Vec<_> = cats.iter().filter(|c| !is_valid_base_category(c) || *c == "allrounder").collect();
             if !invalid.is_empty() {
                 return Err(ApiError::bad_fields(
                     "Invalid regex_base category names",
