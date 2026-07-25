@@ -251,13 +251,46 @@ def api_delete_model(model_id: str) -> bool:
     except Exception:
         return False
 
-def api_train_model(model_id: str, records: List[Dict[str, Any]], blend_base_categories: Optional[List[str]]) -> tuple[int, Any]:
-    payload = {"records": records}
+def api_train_model(
+    model_id: str,
+    records: List[Dict[str, Any]],
+    blend_base_categories: Optional[List[str]],
+    blend_datasets: Optional[List[str]] = None,
+) -> tuple[int, Any]:
+    payload: Dict[str, Any] = {"records": records}
     if blend_base_categories:
         payload["blend_base_categories"] = blend_base_categories
+    if blend_datasets:
+        payload["blend_datasets"] = blend_datasets
     try:
         resp = requests.post(f"{api_base_url}/v1/models/{model_id}/train", headers=get_headers(), json=payload, timeout=10)
         return resp.status_code, resp.json()
+    except Exception as e:
+        return 500, {"error": "client_error", "message": str(e)}
+
+def api_list_datasets(
+    category: Optional[str] = None,
+    status: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """GET /v1/datasets — returns dataset catalog entries."""
+    try:
+        params = {}
+        if category:
+            params["category"] = category
+        if status:
+            params["status"] = status
+        resp = requests.get(f"{api_base_url}/v1/datasets", headers=get_headers(), params=params, timeout=5)
+        if resp.status_code == 200:
+            return resp.json().get("datasets", [])
+    except Exception:
+        pass
+    return []
+
+def api_fetch_dataset(dataset_id: str) -> tuple[int, Any]:
+    """POST /v1/datasets/{id}/fetch — trigger on-demand dataset download."""
+    try:
+        resp = requests.post(f"{api_base_url}/v1/datasets/{dataset_id}/fetch", headers=get_headers(), timeout=10)
+        return resp.status_code, resp.json() if resp.text else {}
     except Exception as e:
         return 500, {"error": "client_error", "message": str(e)}
 
@@ -626,8 +659,11 @@ with tab_models:
         with st.form("create_model_form"):
             mod_name = st.text_input("Model Name", placeholder="e.g., My Finance Guardrail")
             mod_desc = st.text_area("Description", placeholder="e.g., Detects financial instruction injection and prompt attacks")
-            mod_cat = st.selectbox("Target Category", CANONICAL_BASE_CATEGORIES)
-            
+            mod_cat = st.selectbox(
+                "Target Category",
+                ["custom"] + CANONICAL_BASE_CATEGORIES,
+                help="'custom' = general-purpose; choose a canonical category if this model specializes in one attack type."
+            )
             submit_model = st.form_submit_button("🚀 Register Model Slot", type="primary")
 
         if submit_model:
@@ -644,7 +680,10 @@ with tab_models:
     # ── Train Model ───────────────────────────────────────────────────────────
     with mod_sub3:
         st.subheader("Train Custom Model (`POST /v1/models/{id}/train`)")
-        st.caption("Submit training records. The engine will run Mirror Data Augmentation (LLM generated counterpart mirrors) and train a custom LinearSVC weight model.")
+        st.caption(
+            "Submit training records. Optionally supplement with curated open-source datasets "
+            "from the catalog. The engine runs Mirror Data Augmentation then trains a LinearSVC."
+        )
 
         if not models_list:
             st.warning("No registered models available to train. Register a model slot first.")
@@ -657,7 +696,7 @@ with tab_models:
             input_mode = st.radio("Data Input Mode", ["Interactive Preset Records", "JSON / CSV Text Input"])
 
             training_records = []
-            
+
             if input_mode == "Interactive Preset Records":
                 st.info("Default sample dataset loaded below (3 attack examples, 3 benign examples):")
                 sample_records = [
@@ -686,49 +725,185 @@ with tab_models:
                             except Exception:
                                 pass
 
-            st.markdown("#### 2. Base Category Data Blending (Optional)")
-            blend_categories = st.multiselect(
-                "Blend Base Corpora",
-                options=CANONICAL_BASE_CATEGORIES,
-                default=[],
-                help="Optionally merge pre-existing base category dataset examples into training."
+            # ── Blend Configuration ──────────────────────────────────────────
+            st.markdown("#### 2. Curated Dataset Blending (Optional)")
+            st.caption(
+                "Supplement your training records with pre-indexed open-source datasets. "
+                "Use **Category Blend** for broad coverage or **Specific Datasets** to cherry-pick "
+                "individual files from the catalog."
             )
 
+            blend_tab_cat, blend_tab_ds = st.tabs(["📂 Blend by Category", "🗂️ Blend Specific Datasets"])
+
+            blend_categories: List[str] = []
+            blend_dataset_ids: List[str] = []
+
+            with blend_tab_cat:
+                st.markdown("Select one or more canonical categories. All **ready** datasets for those categories will be merged into training.")
+                blend_categories = st.multiselect(
+                    "Categories to blend",
+                    options=CANONICAL_BASE_CATEGORIES,
+                    default=[],
+                    help="Adds all available curated attack + benign corpora for the selected categories."
+                )
+                if blend_categories:
+                    st.info(
+                        f"Will blend all **ready** datasets for: `{'`, `'.join(blend_categories)}`. "
+                        "Switch to 'Blend Specific Datasets' to hand-pick individual files instead."
+                    )
+
+            with blend_tab_ds:
+                st.markdown(
+                    "Select individual datasets from the catalog by ID. "
+                    "Only `ready` datasets can be blended — `fetchable` ones must be downloaded first."
+                )
+
+                # Load dataset catalog from API
+                @st.cache_data(ttl=60, show_spinner=False)
+                def load_catalog() -> List[Dict[str, Any]]:
+                    return api_list_datasets()
+
+                catalog = load_catalog()
+
+                if not catalog:
+                    st.info(
+                        "Dataset catalog is empty or the `/v1/datasets` endpoint is not yet available. "
+                        "The catalog is populated at server startup."
+                    )
+                else:
+                    # Status filter
+                    status_filter = st.selectbox(
+                        "Filter by status",
+                        ["all", "ready", "fetchable", "private"],
+                        index=0,
+                        key="ds_status_filter"
+                    )
+                    cat_filter = st.selectbox(
+                        "Filter by category",
+                        ["all"] + CANONICAL_BASE_CATEGORIES,
+                        index=0,
+                        key="ds_cat_filter"
+                    )
+
+                    filtered = [
+                        d for d in catalog
+                        if (status_filter == "all" or d.get("fetch_status") == status_filter)
+                        and (cat_filter == "all" or d.get("category") == cat_filter)
+                    ]
+
+                    # Build selector options with metadata
+                    STATUS_ICONS = {
+                        "ready":     "🟢",
+                        "fetchable": "🟡",
+                        "private":   "🔒",
+                        "unavailable": "⛔",
+                    }
+                    LABEL_ICONS = {"attack": "⚔️", "benign": "🌿", "mixed": "🔀"}
+
+                    ds_options: Dict[str, str] = {}  # display label → dataset id
+                    for d in filtered:
+                        icon = STATUS_ICONS.get(d.get("fetch_status", ""), "❓")
+                        lbl  = LABEL_ICONS.get(d.get("label_type", ""), "")
+                        cnt  = d.get("record_count")
+                        cnt_str = f"{cnt:,}" if cnt else "?"
+                        cat  = d.get("category", "general")
+                        key  = (
+                            f"{icon} {d.get('display_name', d['id'])} "
+                            f"[{lbl} {cat}] "
+                            f"({cnt_str} records)"
+                        )
+                        ds_options[key] = d["id"]
+
+                    selected_ds_keys = st.multiselect(
+                        "Select datasets to blend",
+                        options=list(ds_options.keys()),
+                        default=[],
+                        help="🟢=ready  🟡=needs download  🔒=private/unavailable"
+                    )
+                    blend_dataset_ids = [ds_options[k] for k in selected_ds_keys]
+
+                    # Warn about non-ready selections
+                    non_ready = [
+                        k for k in selected_ds_keys
+                        if ds_options[k] in [
+                            d["id"] for d in filtered
+                            if d.get("fetch_status") != "ready"
+                        ]
+                    ]
+                    if non_ready:
+                        st.warning(
+                            f"{len(non_ready)} selected dataset(s) are not `ready` and will be "
+                            "rejected by the API. Download them first with the 🗂️ Dataset Catalog tab."
+                        )
+
+                    if blend_dataset_ids:
+                        # Show summary table of selected datasets
+                        selected_rows = [
+                            d for d in filtered if d["id"] in blend_dataset_ids
+                        ]
+                        summary = [{
+                            "Dataset": d.get("display_name", d["id"]),
+                            "Category": d.get("category", "—"),
+                            "Type": d.get("label_type", "—"),
+                            "Records": f"{d['record_count']:,}" if d.get("record_count") else "?",
+                            "Attack": f"{d['attack_count']:,}" if d.get("attack_count") else "?",
+                            "Benign": f"{d['benign_count']:,}" if d.get("benign_count") else "?",
+                            "Status": d.get("fetch_status", "?"),
+                        } for d in selected_rows]
+                        st.dataframe(pd.DataFrame(summary), use_container_width=True)
+
+            # ── Blend summary tooltip ───────────────────────────────────────
+            if blend_categories or blend_dataset_ids:
+                parts = []
+                if blend_categories:
+                    parts.append(f"**Categories:** `{'`, `'.join(blend_categories)}`")
+                if blend_dataset_ids:
+                    parts.append(f"**Specific datasets:** `{'`, `'.join(blend_dataset_ids)}`")
+                st.success("Blend configured: " + " · ".join(parts))
+            else:
+                st.caption("No blending configured — training will use only your submitted records.")
+
             st.markdown("---")
-            if st.button("🔥 Start Model Training", type="primary", width="stretch"):
+            if st.button("🔥 Start Model Training", type="primary", use_container_width=True):
                 if not training_records:
                     st.error("No valid training records provided.")
                 else:
                     with st.spinner("Submitting training job to engine..."):
-                        sc, resp = api_train_model(chosen_model_id, training_records, blend_categories)
-                    
+                        sc, resp = api_train_model(
+                            chosen_model_id,
+                            training_records,
+                            blend_categories or None,
+                            blend_dataset_ids or None,
+                        )
+
                     if sc in (200, 202):
-                        st.success(f"Training job accepted (Status: 202 Accepted)! Model ID: `{chosen_model_id}`")
-                        
-                        # Interactive Polling Status
+                        st.success(f"Training job accepted! Model ID: `{chosen_model_id}`")
+
                         st.markdown("##### Real-Time Training Status Polling")
                         status_placeholder = st.empty()
-                        
-                        for _ in range(30): # Poll for up to 60 seconds
+
+                        for _ in range(30):
                             time.sleep(2)
                             _, poll_resp = api_get_training_status(chosen_model_id)
                             curr_status = poll_resp.get("status", "unknown")
-                            
+
                             status_placeholder.info(
-                                f"Current Status: **{curr_status.upper()}** | "
+                                f"Status: **{curr_status.upper()}** | "
                                 f"Samples: {poll_resp.get('training_samples', 0)} | "
                                 f"F1 Score: {poll_resp.get('f1_score', 'N/A')}"
                             )
-                            
+
                             if curr_status in ("ready", "error"):
                                 if curr_status == "ready":
                                     st.balloons()
-                                    st.success("🎉 Model training completed successfully! Model is ready for detection calls.")
+                                    st.success("🎉 Training complete! Model is ready for detection.")
                                 else:
                                     st.error(f"Training failed: {poll_resp.get('error_message')}")
                                 break
                     else:
                         st.error(f"Training request failed ({sc}): {resp.get('message', resp)}")
+                        if resp.get("fields"):
+                            st.json(resp["fields"])
 
 
 # ===========================================================================

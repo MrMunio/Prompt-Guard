@@ -8,22 +8,38 @@ Adapted from train_l1_specialist.py with these changes:
   - Reads --data-file (JSON lines: {"text": "...", "label": 0|1}) instead of YAML files
   - Outputs --out-weights (path to .weights.json) instead of Rust codegen
   - Reports JSON metrics to stdout: {"f1": float, "recall": float, "precision": float, "samples": int}
-  - Optional --blend-categories: blends base corpus attack+benign data into the training set.
+  - Optional --blend-categories: blends all datasets for a canonical category into the training set.
     Base YAML files are read from --schema-dir and cached as JSONL under --cache-dir.
     Cached JSONL files are reused on subsequent calls — no re-parsing of large YAML files.
+  - Optional --blend-dataset-files: blends specific YAML files by absolute path.
+    These come from the training_datasets catalog (GET /v1/datasets) and are loaded directly,
+    independent of the category mapping. Can be combined with --blend-categories.
 
 Usage:
   python scripts/train_custom_model.py \\
     --data-file /tmp/model_uuid_train.jsonl \\
     --out-weights ./models/custom/uuid.weights.json
 
-  # With base corpus blending:
+  # With category blending:
   python scripts/train_custom_model.py \\
     --data-file /tmp/model_uuid_train.jsonl \\
     --out-weights ./models/custom/uuid.weights.json \\
     --blend-categories instruction_override exfiltration \\
     --schema-dir ./schema/eval \\
     --cache-dir ./models/base_cache
+
+  # With specific dataset file blending:
+  python scripts/train_custom_model.py \\
+    --data-file /tmp/model_uuid_train.jsonl \\
+    --out-weights ./models/custom/uuid.weights.json \\
+    --blend-dataset-files /abs/path/opensource_gandalf_attacks.yaml /abs/path/opensource_giskard_attacks.yaml
+
+  # Combining both:
+  python scripts/train_custom_model.py \\
+    --data-file /tmp/model_uuid_train.jsonl \\
+    --out-weights ./models/custom/uuid.weights.json \\
+    --blend-categories instruction_override \\
+    --blend-dataset-files /abs/path/opensource_gandalf_attacks.yaml
 """
 
 import argparse
@@ -260,6 +276,87 @@ def load_base_blend(
     return blended
 
 
+def load_specific_datasets(
+    file_paths: list[str],
+    existing_seen: set[str] | None = None,
+) -> list[tuple[str, int]]:
+    """
+    Load specific YAML dataset files by absolute path.
+
+    The label for each record is inferred from the YAML content:
+    - Records with label='malicious' or label=1 are treated as attacks (label=1).
+    - Records with label='benign' or label=0 are treated as benign (label=0).
+    - Records with no explicit label field are skipped with a warning.
+
+    Deduplicates against existing_seen (from category blend if both are used).
+    Returns deduplicated (text, label) tuples.
+    """
+    seen: set[str] = set(existing_seen or set())
+    records: list[tuple[str, int]] = []
+
+    for file_path in file_paths:
+        path = Path(file_path)
+        if not path.exists():
+            print(f"  WARNING: blend-dataset-file not found: {file_path}", file=sys.stderr)
+            continue
+        try:
+            import yaml
+            try:
+                loader = yaml.CSafeLoader
+            except AttributeError:
+                loader = yaml.SafeLoader
+            with open(path, encoding="utf-8", errors="replace") as f:
+                data = yaml.load(f, Loader=loader)
+        except Exception as e:
+            print(f"  WARNING: could not load {file_path}: {e}", file=sys.stderr)
+            continue
+
+        if not isinstance(data, list):
+            print(f"  WARNING: {file_path} is not a list, skipping", file=sys.stderr)
+            continue
+
+        loaded = 0
+        skipped = 0
+        for item in data:
+            if not isinstance(item, dict):
+                skipped += 1
+                continue
+            # Extract text.
+            raw = item.get("text") or item.get("content") or item.get("prompt") or ""
+            text = clean(str(raw))
+            if not text:
+                skipped += 1
+                continue
+
+            # Infer label.
+            raw_label = item.get("label")
+            if raw_label is None:
+                skipped += 1
+                continue
+            if raw_label in ("malicious", 1, True):
+                label = 1
+            elif raw_label in ("benign", 0, False):
+                label = 0
+            else:
+                skipped += 1
+                continue
+
+            if text not in seen:
+                seen.add(text)
+                records.append((text, label))
+                loaded += 1
+
+        attacks_in_file = sum(1 for _, l in records[-loaded:] if l == 1)
+        benign_in_file = loaded - attacks_in_file
+        print(
+            f"  [blend-dataset] {path.name}: {loaded} records loaded "
+            f"({attacks_in_file} attack, {benign_in_file} benign), {skipped} skipped",
+            file=sys.stderr,
+        )
+
+    return records
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -277,6 +374,9 @@ def main():
     # Blend arguments
     parser.add_argument("--blend-categories",   nargs="*", default=[],
                         help="Base corpus categories to blend in (e.g. instruction_override exfiltration, or 'all')")
+    parser.add_argument("--blend-dataset-files", nargs="*", default=[],
+                        help="Specific dataset YAML files to blend in by absolute path "
+                             "(from training_datasets catalog, resolved by Rust before calling this script)")
     parser.add_argument("--schema-dir",         default="./schema/eval",
                         help="Path to schema/eval directory containing base YAML files")
     parser.add_argument("--cache-dir",          default="./models/base_cache",
@@ -286,7 +386,7 @@ def main():
     # Load client + mirror records.
     client_records = load_jsonl(args.data_file)
 
-    # Load and append blend records.
+    # --- Category-level blend ---
     blend_records: list[tuple[str, int]] = []
     if args.blend_categories:
         blend_records = load_base_blend(
@@ -294,10 +394,24 @@ def main():
             schema_dir=Path(args.schema_dir),
             cache_dir=Path(args.cache_dir),
         )
-        print(f"  [blend] total blended records: {len(blend_records)}", file=sys.stderr)
+        print(f"  [blend] total category-blended records: {len(blend_records)}", file=sys.stderr)
 
-    # Combine: client records take precedence, blend provides additional context.
-    all_records = client_records + blend_records
+    # --- Specific dataset-level blend ---
+    # Deduplicate against category blend to avoid double-counting.
+    dataset_blend_records: list[tuple[str, int]] = []
+    if args.blend_dataset_files:
+        already_seen = {text for text, _ in blend_records}
+        dataset_blend_records = load_specific_datasets(
+            file_paths=args.blend_dataset_files,
+            existing_seen=already_seen,
+        )
+        print(
+            f"  [blend-dataset] total dataset-blended records: {len(dataset_blend_records)}",
+            file=sys.stderr,
+        )
+
+    # Combine: client records + category blend + specific dataset blend.
+    all_records = client_records + blend_records + dataset_blend_records
 
     if len(all_records) < 4:
         json.dump({"error": "Insufficient training data (minimum 4 records required)"}, sys.stdout)
@@ -364,6 +478,7 @@ def main():
         "precision": pre,
         "samples": len(client_records),
         "blend_samples": len(blend_records),
+        "dataset_blend_samples": len(dataset_blend_records),
     }
     print(json.dumps(metrics))
 

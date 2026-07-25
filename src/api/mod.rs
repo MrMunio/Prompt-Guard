@@ -3,6 +3,7 @@
 
 //! Router assembly — wires all API routes with auth middleware.
 
+pub mod datasets;
 pub mod detect;
 pub mod health;
 pub mod models;
@@ -60,6 +61,9 @@ pub fn build_router(state: AppState, api_key: String) -> Router {
         // Training
         .route("/v1/models/{id}/train", post(train::train_handler))
         .route("/v1/models/{id}/training-status", get(train::training_status_handler))
+        // Dataset catalog
+        .route("/v1/datasets", get(datasets::list_datasets_handler))
+        .route("/v1/datasets/{id}/fetch", post(datasets::fetch_dataset_handler))
         // Auth middleware on all protected routes
         .layer(middleware::from_fn(require_api_key))
         .layer(Extension(ApiKeyConfig { key: api_key }));

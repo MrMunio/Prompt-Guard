@@ -61,6 +61,29 @@ CREATE TABLE IF NOT EXISTS training_records (
 
 CREATE INDEX IF NOT EXISTS idx_pattern_entries_group_id ON pattern_entries(group_id);
 CREATE INDEX IF NOT EXISTS idx_training_records_model_id ON training_records(model_id);
+
+-- Available training datasets for client custom model training.
+-- Seeded at startup from schema/eval/ scan. Clients query via GET /v1/datasets.
+CREATE TABLE IF NOT EXISTS training_datasets (
+    id              TEXT PRIMARY KEY,
+    file_name       TEXT NOT NULL UNIQUE,
+    display_name    TEXT NOT NULL,
+    description     TEXT,
+    category        TEXT NOT NULL,
+    label_type      TEXT NOT NULL,
+    record_count    INTEGER,
+    attack_count    INTEGER,
+    benign_count    INTEGER,
+    file_path       TEXT,
+    fetch_status    TEXT NOT NULL DEFAULT 'ready',
+    hf_uri          TEXT,
+    source_url      TEXT,
+    license         TEXT,
+    last_indexed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_datasets_category ON training_datasets(category);
+CREATE INDEX IF NOT EXISTS idx_training_datasets_status ON training_datasets(fetch_status);
 "#;
 
 // ---------------------------------------------------------------------------
@@ -113,6 +136,27 @@ CREATE TABLE IF NOT EXISTS training_records (
 
 CREATE INDEX IF NOT EXISTS idx_pattern_entries_group_id ON pattern_entries(group_id);
 CREATE INDEX IF NOT EXISTS idx_training_records_model_id ON training_records(model_id);
+
+CREATE TABLE IF NOT EXISTS training_datasets (
+    id              TEXT PRIMARY KEY,
+    file_name       TEXT NOT NULL UNIQUE,
+    display_name    TEXT NOT NULL,
+    description     TEXT,
+    category        TEXT NOT NULL,
+    label_type      TEXT NOT NULL,
+    record_count    INTEGER,
+    attack_count    INTEGER,
+    benign_count    INTEGER,
+    file_path       TEXT,
+    fetch_status    TEXT NOT NULL DEFAULT 'ready',
+    hf_uri          TEXT,
+    source_url      TEXT,
+    license         TEXT,
+    last_indexed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_datasets_category ON training_datasets(category);
+CREATE INDEX IF NOT EXISTS idx_training_datasets_status ON training_datasets(fetch_status);
 "#;
 
 // ---------------------------------------------------------------------------

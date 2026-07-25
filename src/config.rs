@@ -44,6 +44,10 @@ pub struct AppConfig {
 
     /// Path to Python executable (e.g., 'python', 'C:\Users\USER\.conda\envs\ml-guardrails\python.exe').
     pub python_executable: String,
+
+    /// Directory containing curated dataset YAML files for seeding the catalog and blending.
+    /// Used by the dataset seeder and custom model training pipeline.
+    pub schema_eval_dir: String,
 }
 
 impl AppConfig {
@@ -63,6 +67,7 @@ impl AppConfig {
             models_dir: env_default("MODELS_DIR", "./models"),
             parapet_config: env_default("PARAPET_CONFIG", "./parapet.yaml"),
             python_executable: env_default("PYTHON_EXECUTABLE", "python"),
+            schema_eval_dir: env_default("SCHEMA_EVAL_DIR", "./schema/eval"),
         }
     }
 }

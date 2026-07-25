@@ -29,8 +29,15 @@ use crate::error::ApiError;
 #[derive(Deserialize)]
 pub struct TrainRequest {
     pub records: Vec<TrainingRecord>,
+    /// Blend all datasets belonging to these canonical categories.
+    /// Accepts a list of category names or the string "all".
     #[serde(default)]
     pub blend_base_categories: BlendBaseInput,
+    /// Blend specific datasets by their catalog ID (from GET /v1/datasets).
+    /// Takes precedence over category-level blending for individual files.
+    /// Example: ["opensource_gandalf_attacks", "opensource_giskard_attacks"]
+    #[serde(default)]
+    pub blend_datasets: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +94,14 @@ pub async fn train_handler(
         return Err(ApiError::bad_fields("Invalid training records", serde_json::Value::Object(field_errors)));
     }
 
+    // Validate and resolve specific dataset IDs.
+    // Returns (dataset_id, file_path) pairs for each requested dataset.
+    let resolved_datasets = if !req.blend_datasets.is_empty() {
+        resolve_blend_datasets(&req.blend_datasets, &state.db).await?
+    } else {
+        vec![]
+    };
+
     let now = Utc::now().to_rfc3339();
     for record in &req.records {
         insert_training_record(&model_id, &record.text, record.label as i64, &state.db, &now).await?;
@@ -117,11 +132,16 @@ pub async fn train_handler(
         BlendBaseInput::Categories(cats) => cats.clone(),
         BlendBaseInput::None => vec![],
     };
+    // Extract file paths from resolved datasets.
+    let blend_dataset_paths: Vec<String> = resolved_datasets
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect();
 
     tokio::spawn(async move {
         run_training_pipeline(
             &model_id_clone, &models_dir, &llm_base_url, &llm_model,
-            &llm_api_key, &blend_cats, &db_clone, &engine_clone,
+            &llm_api_key, &blend_cats, &blend_dataset_paths, &db_clone, &engine_clone,
         ).await;
     });
 
@@ -133,6 +153,80 @@ pub async fn train_handler(
             "message": "Training started. Poll GET /v1/models/{id}/training-status for updates."
         }))
     ))
+}
+
+/// Validate that each requested dataset ID exists in the catalog and is ready for use.
+/// Returns (id, absolute_file_path) for each valid dataset.
+async fn resolve_blend_datasets(
+    dataset_ids: &[String],
+    db: &DbPool,
+) -> Result<Vec<(String, String)>, ApiError> {
+    let mut resolved = Vec::new();
+    let mut errors = serde_json::Map::new();
+
+    for id in dataset_ids {
+        let row: Option<(String, String, String)> = match db {
+            DbPool::Sqlite(pool) => {
+                sqlx::query_as(
+                    "SELECT id, file_path, fetch_status FROM training_datasets WHERE id = ?"
+                ).bind(id).fetch_optional(pool).await
+                 .map_err(ApiError::from)?
+            }
+            DbPool::Postgres(pool) => {
+                sqlx::query_as(
+                    "SELECT id, file_path, fetch_status FROM training_datasets WHERE id = $1"
+                ).bind(id).fetch_optional(pool).await
+                 .map_err(ApiError::from)?
+            }
+        };
+
+        match row {
+            None => {
+                errors.insert(
+                    format!("blend_datasets[{id}]"),
+                    serde_json::json!("Dataset not found. Use GET /v1/datasets to see available datasets."),
+                );
+            }
+            Some((ds_id, file_path, fetch_status)) => {
+                if fetch_status == "private" {
+                    errors.insert(
+                        format!("blend_datasets[{id}]"),
+                        serde_json::json!("Dataset is private and not available for blending."),
+                    );
+                } else if fetch_status == "unavailable" {
+                    errors.insert(
+                        format!("blend_datasets[{id}]"),
+                        serde_json::json!("Dataset is currently unavailable."),
+                    );
+                } else if fetch_status == "fetchable" {
+                    errors.insert(
+                        format!("blend_datasets[{id}]"),
+                        serde_json::json!(format!(
+                            "Dataset '{}' has not been downloaded yet. \
+                             Trigger download with POST /v1/datasets/{}/fetch first.",
+                            ds_id, ds_id
+                        )),
+                    );
+                } else if file_path.is_empty() {
+                    errors.insert(
+                        format!("blend_datasets[{id}]"),
+                        serde_json::json!("Dataset file path is not set. Re-index with POST /v1/datasets/{id}/fetch."),
+                    );
+                } else {
+                    resolved.push((ds_id, file_path));
+                }
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(ApiError::bad_fields(
+            "One or more blend_datasets are not available",
+            serde_json::Value::Object(errors),
+        ));
+    }
+
+    Ok(resolved)
 }
 
 /// GET /v1/models/:id/training-status
@@ -162,11 +256,14 @@ async fn run_training_pipeline(
     llm_model: &str,
     llm_api_key: &str,
     blend_cats: &[String],
+    blend_dataset_paths: &[String],
     db: &DbPool,
     engine: &EngineState,
 ) {
-    if let Err(e) = do_training(model_id, models_dir, llm_base_url, llm_model,
-                                llm_api_key, blend_cats, db, engine).await {
+    if let Err(e) = do_training(
+        model_id, models_dir, llm_base_url, llm_model,
+        llm_api_key, blend_cats, blend_dataset_paths, db, engine,
+    ).await {
         tracing::error!(model_id, error = %e, "Training failed");
         let now = Utc::now().to_rfc3339();
         let msg = e.to_string();
@@ -195,6 +292,7 @@ async fn do_training(
     llm_model: &str,
     llm_api_key: &str,
     blend_cats: &[String],
+    blend_dataset_paths: &[String],
     db: &DbPool,
     engine: &EngineState,
 ) -> anyhow::Result<()> {
@@ -217,13 +315,34 @@ async fn do_training(
 
     // 2. Export training records to JSONL.
     let data_path = format!("{models_dir}/custom/{model_id}_train.jsonl");
-    export_training_records(model_id, &data_path, db).await?;
+    let client_record_count = export_training_records(model_id, &data_path, db).await?;
+
+    // 2b. Write the client record count NOW so status polling shows a real
+    //     number during training rather than null. The final count (including
+    //     blend) is written again after the Python script completes.
+    {
+        let now_pre = Utc::now().to_rfc3339();
+        match db {
+            DbPool::Sqlite(pool) => {
+                let _ = sqlx::query(
+                    "UPDATE custom_models SET training_samples=?, updated_at=? WHERE id=?"
+                ).bind(client_record_count as i64).bind(&now_pre).bind(model_id)
+                 .execute(pool).await;
+            }
+            DbPool::Postgres(pool) => {
+                let _ = sqlx::query(
+                    "UPDATE custom_models SET training_samples=$1, updated_at=$2 WHERE id=$3"
+                ).bind(client_record_count as i64).bind(&now_pre).bind(model_id)
+                 .execute(pool).await;
+            }
+        }
+    }
 
     // 3. Run training script.
     let weights_path = format!("{models_dir}/custom/{model_id}.weights.json");
     let schema_dir = "./schema/eval";
     let cache_dir = format!("{models_dir}/base_cache");
-    tracing::info!(model_id, blend = ?blend_cats, "Starting SVM training");
+    tracing::info!(model_id, blend = ?blend_cats, client_records = client_record_count, "Starting SVM training");
     let mut cmd = tokio::process::Command::new(&engine.python_executable);
     cmd.arg("scripts/train_custom_model.py")
         .arg("--data-file").arg(&data_path)
@@ -233,6 +352,11 @@ async fn do_training(
     // Append blend categories if any were requested.
     if !blend_cats.is_empty() {
         cmd.arg("--blend-categories").args(blend_cats);
+    }
+    // Append specific dataset file paths if any were requested.
+    // These are absolute paths resolved from the training_datasets catalog.
+    if !blend_dataset_paths.is_empty() {
+        cmd.arg("--blend-dataset-files").args(blend_dataset_paths);
     }
     let train_output = cmd.output().await?;
 
@@ -247,7 +371,12 @@ async fn do_training(
     let f1 = metrics["f1"].as_f64();
     let samples = metrics["samples"].as_i64();
     let blend_samples = metrics["blend_samples"].as_i64().unwrap_or(0);
-    tracing::info!(model_id, f1 = ?f1, client_samples = ?samples, blend_samples, "Training metrics");
+    let dataset_blend_samples = metrics["dataset_blend_samples"].as_i64().unwrap_or(0);
+    tracing::info!(
+        model_id, f1 = ?f1, client_samples = ?samples,
+        blend_samples, dataset_blend_samples,
+        "Training metrics"
+    );
 
     // 5. Update model record.
     let now = Utc::now().to_rfc3339();
@@ -305,7 +434,7 @@ async fn export_training_records(
     model_id: &str,
     output_path: &str,
     db: &DbPool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     use std::io::Write;
     std::fs::create_dir_all(
         std::path::Path::new(output_path).parent().unwrap_or(std::path::Path::new("."))
@@ -327,10 +456,11 @@ async fn export_training_records(
         }
     };
 
+    let count = records.len();
     for (text, label) in records {
         let line = serde_json::json!({ "text": text, "label": label });
         writeln!(file, "{line}")?;
     }
 
-    Ok(())
+    Ok(count)
 }

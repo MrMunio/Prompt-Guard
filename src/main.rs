@@ -14,6 +14,7 @@
 mod api;
 mod auth;
 mod config;
+mod datasets;
 mod db;
 mod engine;
 mod error;
@@ -24,6 +25,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::api::{build_router, AppState};
 use crate::config::AppConfig;
+use crate::datasets::seed_dataset_catalog;
 use crate::db::DbPool;
 use crate::engine::{EngineState, GuardrailEngine};
 use crate::engine::svm_base::{BaseModelRegistry, BASE_MODEL_NAMES};
@@ -71,9 +73,12 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let state = AppState {
-        db,
+        db: db.clone(),
         engine: engine_state,
     };
+
+    // 5b. Seed dataset catalog in background (non-blocking).
+    seed_dataset_catalog(db, config.schema_eval_dir.clone()).await;
 
     // 6. Build router + start server.
     let router = build_router(state, config.api_key.clone());

@@ -1,4 +1,4 @@
-# parapet-guardrail
+# PromptShield(parapet-guardrail-v2)
 
 > **Flexible, operator-deployable prompt-injection guardrail API.**  
 > Drop-in HTTP service that wraps any LLM call with SVM classification, regex scanning, and L0 normalisation — all without touching your existing LLM client code.
