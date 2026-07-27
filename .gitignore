@@ -1,0 +1,23 @@
+# Environment & Secrets
+.env
+*.env
+
+# Build outputs
+target/
+
+# Database & Data
+data/
+*.db
+guardrail.db
+
+# Python bytecode & temp files
+__pycache__/
+*.pyc
+*.pyo
+
+# Development & Scratch Space
+dev_space/
+
+# Large Datasets / Model artifacts
+schema/eval/
+models/custom/
