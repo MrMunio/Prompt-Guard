@@ -1,0 +1,26 @@
+[package]
+name = "parapet"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Parapet core detection library — L0 normalize, L1 SVM, L3 pattern scanning, signal combination"
+
+[lib]
+name = "parapet"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+aho-corasick = "1"
+regex = "1"
+unicode-normalization = "0.1"
+sha2 = "0.10"
+tracing = "0.1"
+thiserror = "2"
+phf = { version = "0.11", features = ["macros"] }
+url = "2"
+
+[features]
+default = []

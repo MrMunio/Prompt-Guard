@@ -1,0 +1,197 @@
+// Copyright 2026 The Parapet Project
+// SPDX-License-Identifier: Apache-2.0
+
+// Signal types for the verdict processor.
+//
+// Layers emit Signals (normalized observations). The VerdictCombiner combines
+// them into a composite Verdict. In shadow mode the engine logs the verdict
+// but does not enforce it.
+
+pub mod combiner;
+pub mod extractor;
+
+// ---------------------------------------------------------------------------
+// Core types
+// ---------------------------------------------------------------------------
+
+/// Identifies which layer produced a signal.
+///
+/// Variants use semantic layer names rather than legacy numeric names. Not all
+/// variants are live in every build or configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LayerId {
+    PatternGate,
+    LexicalClassifier,
+    PayloadScan,
+    /// Router-emitted attribution only. The default combiner excludes this
+    /// layer from atomic blocking, evidence scoring, boost, and contributions.
+    HeuristicSignal,
+    MultiTurnRisk,
+}
+
+impl std::fmt::Display for LayerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LayerId::PatternGate => write!(f, "PatternGate"),
+            LayerId::LexicalClassifier => write!(f, "LexicalClassifier"),
+            LayerId::PayloadScan => write!(f, "PayloadScan"),
+            LayerId::HeuristicSignal => write!(f, "HeuristicSignal"),
+            LayerId::MultiTurnRisk => write!(f, "MultiTurnRisk"),
+        }
+    }
+}
+
+/// Whether a signal is an atomic (hard) block or soft evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalKind {
+    /// Non-negotiable: match = block. Bypasses the combiner.
+    AtomicBlock,
+    /// Contributes to composite score.
+    Evidence,
+}
+
+/// Attribution for segment-level signals.
+/// Lives in signal/ to avoid signal -> layers coupling.
+#[derive(Debug, Clone)]
+pub struct SegmentId {
+    /// Which message this signal came from.
+    pub message_index: usize,
+    /// Byte range within the message (None = full message).
+    pub byte_range: Option<(usize, usize)>,
+    /// Human-readable provenance label.
+    /// Convention: "tool_result", "tool_result:search_api",
+    /// "trust_span", "trust_span:rag_chunk".
+    pub source_label: Option<String>,
+}
+
+/// A normalized observation emitted by a layer.
+#[derive(Debug, Clone)]
+pub struct Signal {
+    pub layer: LayerId,
+    pub kind: SignalKind,
+    pub category: Option<String>,
+    /// Strength of the observation, clamped to [0.0, 1.0].
+    pub score: f32,
+    /// Reliability of the sensor for this observation, clamped to [0.0, 1.0].
+    pub confidence: f32,
+    /// Which message produced this signal (general attribution).
+    pub message_index: Option<usize>,
+    /// Segment-level attribution (L2a-specific detail).
+    pub segment_id: Option<SegmentId>,
+    /// Raw pre-fusion score from the underlying model (e.g. PG2 softmax).
+    /// Present only for layers that perform sensor fusion (L2a).
+    pub raw_model_score: Option<f32>,
+}
+
+impl Signal {
+    /// Construct a signal with clamped score and confidence.
+    ///
+    /// NaN and -INFINITY clamp to 0.0; INFINITY clamps to 1.0.
+    /// `message_index` and `segment_id` default to `None`.
+    pub fn new(
+        layer: LayerId,
+        kind: SignalKind,
+        category: Option<String>,
+        score: f32,
+        confidence: f32,
+    ) -> Self {
+        Self {
+            layer,
+            kind,
+            category,
+            score: clamp_f32(score),
+            confidence: clamp_f32(confidence),
+            message_index: None,
+            segment_id: None,
+            raw_model_score: None,
+        }
+    }
+}
+
+/// Clamp a f32 to [0.0, 1.0], handling NaN and infinities.
+fn clamp_f32(v: f32) -> f32 {
+    if v.is_nan() || v == f32::NEG_INFINITY {
+        0.0
+    } else if v == f32::INFINITY {
+        1.0
+    } else {
+        v.clamp(0.0, 1.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Verdict types
+// ---------------------------------------------------------------------------
+
+/// The combiner's recommended action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictAction {
+    Allow,
+    Block,
+}
+
+/// Composite verdict produced by the combiner.
+#[derive(Debug, Clone)]
+pub struct Verdict {
+    pub action: VerdictAction,
+    pub composite_score: f32,
+    pub contributing: Vec<SignalContribution>,
+}
+
+/// What a single signal contributed to the verdict.
+#[derive(Debug, Clone)]
+pub struct SignalContribution {
+    pub layer: LayerId,
+    pub category: Option<String>,
+    /// Score before dampening.
+    pub raw_score: f32,
+    /// Post-dampener score. Equal to `raw_score` unless the dampener fired.
+    pub weighted_score: f32,
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_new_clamps_nan_to_zero() {
+        let s = Signal::new(LayerId::LexicalClassifier, SignalKind::Evidence, None, f32::NAN, f32::NAN);
+        assert_eq!(s.score, 0.0);
+        assert_eq!(s.confidence, 0.0);
+    }
+
+    #[test]
+    fn signal_new_clamps_neg_infinity_to_zero() {
+        let s = Signal::new(LayerId::LexicalClassifier, SignalKind::Evidence, None, f32::NEG_INFINITY, 0.5);
+        assert_eq!(s.score, 0.0);
+    }
+
+    #[test]
+    fn signal_new_clamps_infinity_to_one() {
+        let s = Signal::new(LayerId::LexicalClassifier, SignalKind::Evidence, None, f32::INFINITY, 0.5);
+        assert_eq!(s.score, 1.0);
+    }
+
+    #[test]
+    fn signal_new_clamps_negative_to_zero() {
+        let s = Signal::new(LayerId::LexicalClassifier, SignalKind::Evidence, None, -0.5, 0.5);
+        assert_eq!(s.score, 0.0);
+    }
+
+    #[test]
+    fn signal_new_clamps_above_one() {
+        let s = Signal::new(LayerId::LexicalClassifier, SignalKind::Evidence, None, 1.5, 0.5);
+        assert_eq!(s.score, 1.0);
+    }
+
+    #[test]
+    fn signal_new_preserves_valid_values() {
+        let s = Signal::new(LayerId::LexicalClassifier, SignalKind::Evidence, None, 0.7, 0.9);
+        assert!((s.score - 0.7).abs() < f32::EPSILON);
+        assert!((s.confidence - 0.9).abs() < f32::EPSILON);
+    }
+}
