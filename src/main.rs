@@ -70,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
         llm_model: config.llm_model.clone(),
         llm_api_key: config.llm_api_key.clone(),
         python_executable: config.python_executable.clone(),
+        mirror_max_records: config.mirror_max_records,
     });
 
     let state = AppState {

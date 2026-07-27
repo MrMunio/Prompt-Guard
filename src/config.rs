@@ -48,6 +48,13 @@ pub struct AppConfig {
     /// Directory containing curated dataset YAML files for seeding the catalog and blending.
     /// Used by the dataset seeder and custom model training pipeline.
     pub schema_eval_dir: String,
+
+    /// Maximum number of mirror records generated **per label class** per training request.
+    /// The LLM generates at most this many attack mirrors AND at most this many benign mirrors.
+    /// Total LLM calls are capped at 2 × mirror_max_records per request.
+    /// Set to 0 for unlimited (not recommended — can exhaust tokens on large uploads).
+    /// Default: 500 (i.e. up to 500 attack mirrors + 500 benign mirrors = up to 1000 total).
+    pub mirror_max_records: usize,
 }
 
 impl AppConfig {
@@ -68,6 +75,7 @@ impl AppConfig {
             parapet_config: env_default("PARAPET_CONFIG", "./parapet.yaml"),
             python_executable: env_default("PYTHON_EXECUTABLE", "python"),
             schema_eval_dir: env_default("SCHEMA_EVAL_DIR", "./schema/eval"),
+            mirror_max_records: env_parse("MIRROR_MAX_RECORDS", 500usize),
         }
     }
 }

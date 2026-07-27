@@ -38,6 +38,11 @@ pub struct TrainRequest {
     /// Example: ["opensource_gandalf_attacks", "opensource_giskard_attacks"]
     #[serde(default)]
     pub blend_datasets: Vec<String>,
+    /// Whether to run LLM mirror augmentation to generate synthetic counterpart records.
+    /// Default: false (opt-in). Set to true to enable LLM mirror generation.
+    /// When false, training proceeds on client records + blend data only.
+    #[serde(default)]
+    pub enable_mirror: bool,
 }
 
 #[derive(Deserialize)]
@@ -103,6 +108,22 @@ pub async fn train_handler(
     };
 
     let now = Utc::now().to_rfc3339();
+
+    // Clear existing training records for this model before inserting new ones.
+    // Without this, each retrain call accumulates records and inflates training_samples.
+    // Blend records (from base datasets) are loaded fresh by train_custom_model.py each run
+    // and are never stored here, so this only clears client + mirror_generated rows.
+    match &*state.db {
+        DbPool::Sqlite(pool) => {
+            sqlx::query("DELETE FROM training_records WHERE model_id = ?")
+                .bind(&model_id).execute(pool).await?;
+        }
+        DbPool::Postgres(pool) => {
+            sqlx::query("DELETE FROM training_records WHERE model_id = $1")
+                .bind(&model_id).execute(pool).await?;
+        }
+    }
+
     for record in &req.records {
         insert_training_record(&model_id, &record.text, record.label as i64, &state.db, &now).await?;
     }
@@ -127,6 +148,8 @@ pub async fn train_handler(
     let llm_base_url = state.engine.llm_base_url.clone();
     let llm_model = state.engine.llm_model.clone();
     let llm_api_key = state.engine.llm_api_key.clone();
+    let mirror_max_records = state.engine.mirror_max_records;
+    let enable_mirror = req.enable_mirror;
     let blend_cats = match &req.blend_base_categories {
         BlendBaseInput::All(_) => vec!["all".to_string()],
         BlendBaseInput::Categories(cats) => cats.clone(),
@@ -141,7 +164,8 @@ pub async fn train_handler(
     tokio::spawn(async move {
         run_training_pipeline(
             &model_id_clone, &models_dir, &llm_base_url, &llm_model,
-            &llm_api_key, &blend_cats, &blend_dataset_paths, &db_clone, &engine_clone,
+            &llm_api_key, enable_mirror, mirror_max_records,
+            &blend_cats, &blend_dataset_paths, &db_clone, &engine_clone,
         ).await;
     });
 
@@ -150,6 +174,7 @@ pub async fn train_handler(
         Json(serde_json::json!({
             "model_id": model_id,
             "status": "training",
+            "mirror_enabled": enable_mirror,
             "message": "Training started. Poll GET /v1/models/{id}/training-status for updates."
         }))
     ))
@@ -255,6 +280,8 @@ async fn run_training_pipeline(
     llm_base_url: &str,
     llm_model: &str,
     llm_api_key: &str,
+    enable_mirror: bool,
+    mirror_max_records: usize,
     blend_cats: &[String],
     blend_dataset_paths: &[String],
     db: &DbPool,
@@ -262,7 +289,8 @@ async fn run_training_pipeline(
 ) {
     if let Err(e) = do_training(
         model_id, models_dir, llm_base_url, llm_model,
-        llm_api_key, blend_cats, blend_dataset_paths, db, engine,
+        llm_api_key, enable_mirror, mirror_max_records,
+        blend_cats, blend_dataset_paths, db, engine,
     ).await {
         tracing::error!(model_id, error = %e, "Training failed");
         let now = Utc::now().to_rfc3339();
@@ -291,26 +319,36 @@ async fn do_training(
     llm_base_url: &str,
     llm_model: &str,
     llm_api_key: &str,
+    enable_mirror: bool,
+    mirror_max_records: usize,
     blend_cats: &[String],
     blend_dataset_paths: &[String],
     db: &DbPool,
     engine: &EngineState,
 ) -> anyhow::Result<()> {
-    // 1. Mirror augmentation.
-    tracing::info!(model_id, "Starting mirror augmentation");
+    // 1. Mirror augmentation (only when client explicitly enables it).
     let db_url = match db { DbPool::Sqlite(_) => "sqlite:guardrail.db", DbPool::Postgres(_) => "postgres" };
-    let aug_output = tokio::process::Command::new(&engine.python_executable)
-        .arg("scripts/mirror_augment.py")
-        .arg("--model-id").arg(model_id)
-        .arg("--db-url").arg(db_url)
-        .arg("--base-url").arg(llm_base_url)
-        .arg("--model").arg(llm_model)
-        .arg("--api-key").arg(llm_api_key)
-        .output().await?;
+    if enable_mirror {
+        tracing::info!(model_id, mirror_max_records, "Starting mirror augmentation (LLM enabled by client)");
+        let aug_output = tokio::process::Command::new(&engine.python_executable)
+            .arg("scripts/mirror_augment.py")
+            .arg("--model-id").arg(model_id)
+            .arg("--db-url").arg(db_url)
+            .arg("--base-url").arg(llm_base_url)
+            .arg("--model").arg(llm_model)
+            .arg("--api-key").arg(llm_api_key)
+            .arg("--max-records-per-class").arg(mirror_max_records.to_string())
+            .output().await?;
 
-    if !aug_output.status.success() {
-        let err = String::from_utf8_lossy(&aug_output.stderr);
-        anyhow::bail!("mirror_augment.py failed: {err}");
+        if !aug_output.status.success() {
+            let err = String::from_utf8_lossy(&aug_output.stderr);
+            anyhow::bail!("mirror_augment.py failed: {err}");
+        }
+        // Log mirror summary from stdout JSON if present.
+        let mirror_summary = String::from_utf8_lossy(&aug_output.stdout);
+        tracing::info!(model_id, summary = %mirror_summary.trim(), "Mirror augmentation complete");
+    } else {
+        tracing::info!(model_id, "Mirror augmentation skipped — enable_mirror=false (client did not opt in)");
     }
 
     // 2. Export training records to JSONL.
@@ -369,12 +407,17 @@ async fn do_training(
     let metrics_str = String::from_utf8_lossy(&train_output.stdout);
     let metrics: serde_json::Value = serde_json::from_str(&metrics_str).unwrap_or(serde_json::json!({}));
     let f1 = metrics["f1"].as_f64();
-    let samples = metrics["samples"].as_i64();
+    // client_samples: records submitted by the client this training run (from the JSONL export).
+    let client_samples = metrics["samples"].as_i64().unwrap_or(client_record_count as i64);
     let blend_samples = metrics["blend_samples"].as_i64().unwrap_or(0);
     let dataset_blend_samples = metrics["dataset_blend_samples"].as_i64().unwrap_or(0);
+    // total_samples: actual records the model was trained on (client + all blends, after dedup).
+    // This is what we store in training_samples so the user sees the real training data size.
+    let total_samples = metrics["total_samples"].as_i64()
+        .unwrap_or(client_samples + blend_samples + dataset_blend_samples);
     tracing::info!(
-        model_id, f1 = ?f1, client_samples = ?samples,
-        blend_samples, dataset_blend_samples,
+        model_id, f1 = ?f1,
+        client_samples, blend_samples, dataset_blend_samples, total_samples,
         "Training metrics"
     );
 
@@ -384,13 +427,13 @@ async fn do_training(
         DbPool::Sqlite(pool) => {
             sqlx::query(
                 "UPDATE custom_models SET status='ready', model_path=?, f1_score=?, training_samples=?, updated_at=? WHERE id=?"
-            ).bind(&weights_path).bind(f1).bind(samples).bind(&now).bind(model_id)
+            ).bind(&weights_path).bind(f1).bind(total_samples).bind(&now).bind(model_id)
              .execute(pool).await?;
         }
         DbPool::Postgres(pool) => {
             sqlx::query(
                 "UPDATE custom_models SET status='ready', model_path=$1, f1_score=$2, training_samples=$3, updated_at=$4 WHERE id=$5"
-            ).bind(&weights_path).bind(f1).bind(samples).bind(&now).bind(model_id)
+            ).bind(&weights_path).bind(f1).bind(total_samples).bind(&now).bind(model_id)
              .execute(pool).await?;
         }
     }
@@ -401,7 +444,7 @@ async fn do_training(
     // 7. Clean up temp data file.
     let _ = std::fs::remove_file(&data_path);
 
-    tracing::info!(model_id, f1 = ?f1, samples = ?samples, "Training complete");
+    tracing::info!(model_id, f1 = ?f1, total_samples, client_samples, "Training complete");
     Ok(())
 }
 

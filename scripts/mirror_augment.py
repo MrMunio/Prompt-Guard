@@ -10,13 +10,20 @@ and inserts it into training_records (source='mirror_generated').
 
 Based on the Mirror Design Pattern (arxiv 2603.11875v1 §4.2).
 
+Mirror cap:
+  --max-records-per-class N  limits the number of mirrors generated per label class.
+  Attack records (label=1) generate at most N benign mirrors.
+  Benign records (label=0) generate at most N attack mirrors.
+  Set to 0 to disable the cap (unlimited — not recommended for large datasets).
+
 Usage (called by train.rs background task):
   python scripts/mirror_augment.py \
     --model-id <uuid> \
     --db-url sqlite:guardrail.db \
     --base-url https://api.openai.com/v1 \
     --model gpt-4o-mini \
-    --api-key sk-...
+    --api-key sk-... \
+    --max-records-per-class 500
 """
 
 import argparse
@@ -114,6 +121,15 @@ def main():
     parser.add_argument("--model",     required=True)
     parser.add_argument("--api-key",   required=True)
     parser.add_argument("--dry-run",   action="store_true")
+    parser.add_argument(
+        "--max-records-per-class",
+        type=int,
+        default=500,
+        help=(
+            "Max mirror records generated per label class (attack/benign independently). "
+            "Set to 0 for unlimited (not recommended). Default: 500."
+        ),
+    )
     args = parser.parse_args()
 
     # Resolve DB path from DATABASE_URL style value.
@@ -128,17 +144,50 @@ def main():
     if not records:
         print("No records to augment.", file=sys.stderr)
         conn.close()
+        summary = {"generated": 0, "skipped_cap": 0, "failed": 0}
+        print(json.dumps(summary))
         return
 
     if args.dry_run:
-        print(f"[dry-run] would generate {len(records)} mirror records", file=sys.stderr)
+        print(f"[dry-run] would generate up to {len(records)} mirror records", file=sys.stderr)
         conn.close()
         return
+
+    # Separate records by label class for independent per-class capping.
+    # label=1 (attack) records generate benign mirrors.
+    # label=0 (benign) records generate attack mirrors.
+    max_per_class = args.max_records_per_class  # 0 = unlimited
+
+    attack_records = [r for r in records if r["label"] == 1]
+    benign_records = [r for r in records if r["label"] == 0]
+
+    if max_per_class > 0:
+        attack_capped = attack_records[:max_per_class]
+        benign_capped = benign_records[:max_per_class]
+        skipped_cap = (
+            len(attack_records) - len(attack_capped) +
+            len(benign_records) - len(benign_capped)
+        )
+        if skipped_cap > 0:
+            print(
+                f"  [cap] mirror cap={max_per_class} per class: "
+                f"attack records {len(attack_records)}→{len(attack_capped)}, "
+                f"benign records {len(benign_records)}→{len(benign_capped)} "
+                f"({skipped_cap} total skipped)",
+                file=sys.stderr,
+            )
+        records_to_process = attack_capped + benign_capped
+    else:
+        # Unlimited — process all records.
+        skipped_cap = 0
+        records_to_process = records
+        print(f"  [cap] no mirror cap (max_records_per_class=0)", file=sys.stderr)
 
     client = httpx.Client()
     now = datetime.now(timezone.utc).isoformat()
     success = 0
-    for rec in records:
+    failed = 0
+    for rec in records_to_process:
         mirror = call_llm(client, args.base_url, args.model, args.api_key,
                           rec["text"], rec["label"])
         if mirror:
@@ -147,11 +196,19 @@ def main():
             success += 1
         else:
             print(f"  WARNING: Could not generate mirror for record {rec['id']}", file=sys.stderr)
+            failed += 1
 
     conn.commit()
     conn.close()
     client.close()
-    print(f"Mirror augmentation complete: {success}/{len(records)} records generated", file=sys.stderr)
+    print(
+        f"Mirror augmentation complete: {success}/{len(records_to_process)} generated, "
+        f"{skipped_cap} skipped (cap), {failed} failed",
+        file=sys.stderr,
+    )
+    # Summary JSON to stdout — read by train.rs for logging.
+    summary = {"generated": success, "skipped_cap": skipped_cap, "failed": failed}
+    print(json.dumps(summary))
 
 
 if __name__ == "__main__":

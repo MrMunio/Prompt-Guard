@@ -53,7 +53,12 @@ pub struct DatasetEntry {
 #[derive(Debug, Deserialize)]
 pub struct DatasetQuery {
     pub category: Option<String>,
+    /// Filter by fetch_status: "ready" | "fetchable" | "private" | "unavailable"
     pub status: Option<String>,
+    /// Filter by label_type: "attack_only" | "benign_only" | "mixed"
+    pub label_type: Option<String>,
+    /// Filter by license string (e.g., "apache-2.0", "cc-by-4.0", "mit")
+    pub license: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -64,7 +69,13 @@ pub async fn list_datasets_handler(
     State(state): State<AppState>,
     Query(query): Query<DatasetQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = fetch_datasets(&state.db, query.category.as_deref(), query.status.as_deref()).await?;
+    let rows = fetch_datasets(
+        &state.db,
+        query.category.as_deref(),
+        query.status.as_deref(),
+        query.label_type.as_deref(),
+        query.license.as_deref(),
+    ).await?;
 
     // Build list of supported/unavailable categories for summary.
     let all_categories = [
@@ -166,6 +177,8 @@ async fn fetch_datasets(
     db: &DbPool,
     category: Option<&str>,
     status: Option<&str>,
+    label_type: Option<&str>,
+    license: Option<&str>,
 ) -> Result<Vec<DatasetEntry>, ApiError> {
     macro_rules! map_row {
         ($row:expr) => {
@@ -192,8 +205,10 @@ async fn fetch_datasets(
         DbPool::Sqlite(pool) => {
             // Build dynamic WHERE clause for SQLite.
             let mut conditions = Vec::new();
-            if category.is_some() { conditions.push("category = ?"); }
-            if status.is_some()   { conditions.push("fetch_status = ?"); }
+            if category.is_some()   { conditions.push("category = ?"); }
+            if status.is_some()     { conditions.push("fetch_status = ?"); }
+            if label_type.is_some() { conditions.push("label_type = ?"); }
+            if license.is_some()    { conditions.push("license = ?"); }
             let where_clause = if conditions.is_empty() {
                 String::new()
             } else {
@@ -207,16 +222,21 @@ async fn fetch_datasets(
                 where_clause
             );
             let mut q = sqlx::query(&sql);
-            if let Some(c) = category { q = q.bind(c); }
-            if let Some(s) = status   { q = q.bind(s); }
+            if let Some(c) = category   { q = q.bind(c); }
+            if let Some(s) = status     { q = q.bind(s); }
+            if let Some(l) = label_type { q = q.bind(l); }
+            if let Some(li) = license   { q = q.bind(li); }
             let rows = q.fetch_all(pool).await?;
             Ok(rows.iter().map(|r| map_row!(r)).collect())
         }
         DbPool::Postgres(pool) => {
             let mut conditions = Vec::new();
             let mut idx = 1usize;
-            if category.is_some() { conditions.push(format!("category = ${idx}")); idx += 1; }
-            if status.is_some()   { conditions.push(format!("fetch_status = ${idx}")); }
+            if category.is_some()   { conditions.push(format!("category = ${idx}")); idx += 1; }
+            if status.is_some()     { conditions.push(format!("fetch_status = ${idx}")); idx += 1; }
+            if label_type.is_some() { conditions.push(format!("label_type = ${idx}")); idx += 1; }
+            if license.is_some()    { conditions.push(format!("license = ${idx}")); idx += 1; }
+            let _ = idx; // suppress unused warning
             let where_clause = if conditions.is_empty() {
                 String::new()
             } else {
@@ -230,8 +250,10 @@ async fn fetch_datasets(
                 where_clause
             );
             let mut q = sqlx::query(&sql);
-            if let Some(c) = category { q = q.bind(c); }
-            if let Some(s) = status   { q = q.bind(s); }
+            if let Some(c) = category   { q = q.bind(c); }
+            if let Some(s) = status     { q = q.bind(s); }
+            if let Some(l) = label_type { q = q.bind(l); }
+            if let Some(li) = license   { q = q.bind(li); }
             let rows = q.fetch_all(pool).await?;
             Ok(rows.iter().map(|r| map_row!(r)).collect())
         }

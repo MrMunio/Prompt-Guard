@@ -10,19 +10,56 @@ Real user questions across domains (finance, medicine, open_qa, reddit_eli5, wik
 All benign. Good for L1 training negative class and L3-inbound false-positive testing.
 """
 
-from datasets import load_dataset
+import requests
 import yaml
 import sys
 
+API = "https://datasets-server.huggingface.co/rows"
+DATASET = "Hello-SimpleAI/HC3"
+CONFIG = "all"
+SPLIT = "train"
+BATCH = 100
+MAX_ROWS = 5000  # Cap at 5k to keep eval baseline balanced
+
+
+def fetch_all_rows():
+    rows = []
+    offset = 0
+    while len(rows) < MAX_ROWS:
+        resp = requests.get(
+            API,
+            params={
+                "dataset": DATASET,
+                "config": CONFIG,
+                "split": SPLIT,
+                "offset": offset,
+                "length": BATCH,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        batch = data.get("rows", [])
+        if not batch:
+            break
+        for item in batch:
+            row = item.get("row", {})
+            rows.append(row)
+        print(f"  fetched {len(rows)} rows so far...", file=sys.stderr)
+        offset += BATCH
+        if len(batch) < BATCH:
+            break
+    return rows
+
 
 def main():
-    print("Loading Hello-SimpleAI/HC3...", file=sys.stderr)
-    ds = load_dataset("Hello-SimpleAI/HC3", "all", split="train", trust_remote_code=True)
-    print(f"Total rows: {len(ds)}", file=sys.stderr)
+    print("Fetching Hello-SimpleAI/HC3 via Hugging Face Server API...", file=sys.stderr)
+    raw_rows = fetch_all_rows()
+    print(f"Total raw rows fetched: {len(raw_rows)}", file=sys.stderr)
 
     cases = []
     seen = set()
-    for i, row in enumerate(ds):
+    for i, row in enumerate(raw_rows):
         text = (row.get("question") or "").strip()
         if not text or text in seen:
             continue

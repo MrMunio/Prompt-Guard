@@ -38,6 +38,9 @@ pub struct EngineState {
     pub llm_model: String,
     pub llm_api_key: String,
     pub python_executable: String,
+    /// Max mirror records generated per label class per training request.
+    /// Passed as --max-records to mirror_augment.py.
+    pub mirror_max_records: usize,
 }
 
 impl std::ops::Deref for EngineState {

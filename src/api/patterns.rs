@@ -30,6 +30,8 @@ use crate::error::ApiError;
 // Request / response types
 // ---------------------------------------------------------------------------
 
+fn default_false() -> bool { false }
+
 #[derive(Deserialize)]
 pub struct CreatePatternGroupRequest {
     pub id: Option<String>,
@@ -38,6 +40,11 @@ pub struct CreatePatternGroupRequest {
     pub category: Option<String>,
     /// One or more strings: plain-text intent or actual regex patterns.
     pub input: Vec<String>,
+    /// If true, plain-text inputs that fail regex compilation are sent to the
+    /// LLM to generate regex patterns. Default: false (opt-in).
+    /// When false, uncompilable inputs are regex-escaped and stored as literals.
+    #[serde(default = "default_false")]
+    pub use_llm: bool,
 }
 
 #[derive(Deserialize)]
@@ -50,6 +57,10 @@ pub struct UpdatePatternGroupRequest {
 #[derive(Deserialize)]
 pub struct AddPatternEntriesRequest {
     pub input: Vec<String>,
+    /// If true, plain-text inputs that fail regex compilation are sent to the
+    /// LLM to generate regex patterns. Default: false (opt-in).
+    #[serde(default = "default_false")]
+    pub use_llm: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,6 +100,7 @@ pub async fn create_pattern_group(
     // Determine which inputs are regex and which need LLM generation.
     let mut patterns: Vec<String> = Vec::new();
     let mut needs_llm: Vec<String> = Vec::new();
+    let mut llm_used = false;
 
     for input in &req.input {
         if compile_pattern(input).is_ok() {
@@ -98,14 +110,24 @@ pub async fn create_pattern_group(
         }
     }
 
-    // Generate regex for plain-text descriptions via LLM (if configured).
+    // Generate regex for plain-text descriptions.
+    // LLM is only invoked when the client explicitly sets use_llm=true.
     for desc in &needs_llm {
-        match generate_regex_via_llm(desc, &state).await {
-            Ok(generated) => patterns.extend(generated),
-            Err(e) => {
-                tracing::warn!(description = desc, error = %e, "LLM regex generation skipped — storing description as literal pattern");
-                patterns.push(regex::escape(desc));
+        if req.use_llm {
+            match generate_regex_via_llm(desc, &state).await {
+                Ok(generated) => {
+                    llm_used = true;
+                    patterns.extend(generated);
+                }
+                Err(e) => {
+                    tracing::warn!(description = desc, error = %e, "LLM regex generation failed — storing description as literal pattern");
+                    patterns.push(regex::escape(desc));
+                }
             }
+        } else {
+            // LLM opt-in not set: regex-escape the plain-text input and store as literal.
+            tracing::debug!(description = desc, "use_llm=false — storing plain-text input as escaped literal pattern");
+            patterns.push(regex::escape(desc));
         }
     }
 
@@ -142,8 +164,13 @@ pub async fn create_pattern_group(
     // Invalidate custom regex cache for this group.
     state.engine.regex_custom_cache.evict(&group_id).await;
 
-    let resp = load_pattern_group_response(&group_id, &state.db).await?;
-    Ok((axum::http::StatusCode::CREATED, Json(resp)))
+    let mut resp_json = serde_json::to_value(
+        load_pattern_group_response(&group_id, &state.db).await?
+    ).unwrap_or_default();
+    if let serde_json::Value::Object(ref mut map) = resp_json {
+        map.insert("llm_used".to_string(), serde_json::Value::Bool(llm_used));
+    }
+    Ok((axum::http::StatusCode::CREATED, Json(resp_json)))
 }
 
 /// GET /v1/patterns
@@ -256,17 +283,24 @@ pub async fn add_pattern_entries(
     let _ = load_pattern_group_response(&id, &state.db).await?; // 404 check
 
     let mut patterns: Vec<String> = Vec::new();
+    let mut llm_used = false;
     for input in &req.input {
         if compile_pattern(input).is_ok() {
             patterns.push(input.clone());
-        } else {
+        } else if req.use_llm {
             match generate_regex_via_llm(input, &state).await {
-                Ok(generated) => patterns.extend(generated),
+                Ok(generated) => {
+                    llm_used = true;
+                    patterns.extend(generated);
+                }
                 Err(e) => {
-                    tracing::warn!(description = input, error = %e, "LLM regex generation skipped — storing description as literal pattern");
+                    tracing::warn!(description = input, error = %e, "LLM regex generation failed — storing description as literal pattern");
                     patterns.push(regex::escape(input));
                 }
             }
+        } else {
+            tracing::debug!(description = input, "use_llm=false — storing plain-text input as escaped literal pattern");
+            patterns.push(regex::escape(input));
         }
     }
 
@@ -276,8 +310,13 @@ pub async fn add_pattern_entries(
     }
 
     state.engine.regex_custom_cache.evict(&id).await;
-    let resp = load_pattern_group_response(&id, &state.db).await?;
-    Ok(Json(resp))
+    let mut resp_json = serde_json::to_value(
+        load_pattern_group_response(&id, &state.db).await?
+    ).unwrap_or_default();
+    if let serde_json::Value::Object(ref mut map) = resp_json {
+        map.insert("llm_used".to_string(), serde_json::Value::Bool(llm_used));
+    }
+    Ok(Json(resp_json))
 }
 
 /// DELETE /v1/patterns/:id/entries/:entry_id
