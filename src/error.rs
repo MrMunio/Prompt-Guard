@@ -101,6 +101,28 @@ impl IntoResponse for ApiError {
 
 impl From<sqlx::Error> for ApiError {
     fn from(e: sqlx::Error) -> Self {
+        // Detect UNIQUE constraint violations and surface them as 409 Conflict
+        // rather than leaking raw DB internals as a 500.
+        if let sqlx::Error::Database(ref db_err) = e {
+            let msg = db_err.message();
+            // SQLite:   "UNIQUE constraint failed: <table>.<column>"
+            // Postgres: "duplicate key value violates unique constraint \"<index>\""
+            if msg.contains("UNIQUE constraint failed") || msg.contains("duplicate key value") {
+                // Extract the conflicting field name for a cleaner message.
+                let detail = if msg.contains("pattern_groups.name") {
+                    "a pattern group with this 'name' already exists".to_string()
+                } else if msg.contains("pattern_groups.id") {
+                    "a pattern group with this 'id' already exists".to_string()
+                } else if msg.contains("custom_models.name") {
+                    "a custom model with this 'name' already exists".to_string()
+                } else if msg.contains("custom_models.id") {
+                    "a custom model with this 'id' already exists".to_string()
+                } else {
+                    format!("a record with this identifier already exists: {msg}")
+                };
+                return ApiError::Conflict(detail);
+            }
+        }
         tracing::error!(error = %e, "database error");
         ApiError::Internal(format!("database error: {e}"))
     }

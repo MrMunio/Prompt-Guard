@@ -97,6 +97,58 @@ pub async fn create_pattern_group(
         return Err(ApiError::bad("'input' must contain at least one pattern or description"));
     }
 
+    // --- Early conflict check: fail fast before any LLM work ---
+    // Check if the requested id is already taken.
+    if let Some(ref requested_id) = req.id {
+        let exists = match &*state.db {
+            DbPool::Sqlite(pool) => {
+                sqlx::query("SELECT 1 FROM pattern_groups WHERE id = ?")
+                    .bind(requested_id)
+                    .fetch_optional(pool)
+                    .await?
+                    .is_some()
+            }
+            DbPool::Postgres(pool) => {
+                sqlx::query("SELECT 1 FROM pattern_groups WHERE id = $1")
+                    .bind(requested_id)
+                    .fetch_optional(pool)
+                    .await?
+                    .is_some()
+            }
+        };
+        if exists {
+            return Err(ApiError::Conflict(format!(
+                "a pattern group with id '{}' already exists",
+                requested_id
+            )));
+        }
+    }
+    // Check if the requested name is already taken.
+    {
+        let name_exists = match &*state.db {
+            DbPool::Sqlite(pool) => {
+                sqlx::query("SELECT 1 FROM pattern_groups WHERE name = ?")
+                    .bind(&req.name)
+                    .fetch_optional(pool)
+                    .await?
+                    .is_some()
+            }
+            DbPool::Postgres(pool) => {
+                sqlx::query("SELECT 1 FROM pattern_groups WHERE name = $1")
+                    .bind(&req.name)
+                    .fetch_optional(pool)
+                    .await?
+                    .is_some()
+            }
+        };
+        if name_exists {
+            return Err(ApiError::Conflict(format!(
+                "a pattern group with name '{}' already exists",
+                req.name
+            )));
+        }
+    }
+
     // Determine which inputs are regex and which need LLM generation.
     let mut patterns: Vec<String> = Vec::new();
     let mut needs_llm: Vec<String> = Vec::new();
