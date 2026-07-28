@@ -279,13 +279,39 @@ Content-Type: application/json
 ### 4.2 List Pattern Groups
 
 ```http
-GET /v1/patterns?category=exfiltration
+GET /v1/patterns
 X-API-Key: <key>
 ```
 
-Query params: `?category=<category>` (optional filter)
+**Response `200 OK`:** Segregated object containing available `base` regex pattern groups and `custom` pattern groups.
 
-**Response `200 OK`:** Array of pattern group summaries (no entries detail).
+```json
+{
+  "base": [
+    {
+      "id": "exfiltration",
+      "name": "Data Exfiltration Regex Patterns",
+      "description": "Built-in regex rules detecting secret leakage, prompt exfiltration, and system prompt extract triggers",
+      "category": "exfiltration"
+    },
+    {
+      "id": "instruction_override",
+      "name": "Instruction Override Regex Patterns",
+      "description": "Built-in regex rules detecting directive resets and system prompt overrides",
+      "category": "instruction_override"
+    }
+  ],
+  "custom": [
+    {
+      "id": "b7a8c9d2-...",
+      "name": "Competitor Mention Block",
+      "description": "Blocks references to competitor products",
+      "category": "exfiltration",
+      "entries": [...]
+    }
+  ]
+}
+```
 
 ### 4.3 Get Pattern Group
 
@@ -397,7 +423,35 @@ GET /v1/models
 X-API-Key: <key>
 ```
 
-**Response `200 OK`:** Array of model metadata objects.
+**Response `200 OK`:** Segregated object containing `base` SVM classifiers and registered `custom` SVM models.
+
+```json
+{
+  "base": [
+    {
+      "id": "allrounder",
+      "name": "Allrounder Composite SVM",
+      "description": "Combined multi-category classifier trained on all attack categories",
+      "category": "allrounder"
+    },
+    {
+      "id": "instruction_override",
+      "name": "Instruction Override SVM",
+      "description": "Detects commands attempting to ignore, override, or replace system instructions",
+      "category": "instruction_override"
+    }
+  ],
+  "custom": [
+    {
+      "id": "0b099b6c-...",
+      "name": "Finance Bot Injection Detector",
+      "description": "Detects prompt injection in financial assistant context",
+      "category": "instruction_override",
+      "status": "ready"
+    }
+  ]
+}
+```
 
 ### 5.3 Get Model
 

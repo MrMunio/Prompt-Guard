@@ -139,6 +139,73 @@ pub async fn create_model(
     Ok((axum::http::StatusCode::CREATED, Json(resp)))
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct BaseSvmModelInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub category: String,
+}
+
+pub fn get_base_models_info() -> Vec<BaseSvmModelInfo> {
+    vec![
+        BaseSvmModelInfo {
+            id: "allrounder".to_string(),
+            name: "Allrounder Composite SVM".to_string(),
+            description: "Combined multi-category classifier trained on all attack categories".to_string(),
+            category: "allrounder".to_string(),
+        },
+        BaseSvmModelInfo {
+            id: "instruction_override".to_string(),
+            name: "Instruction Override SVM".to_string(),
+            description: "Detects commands attempting to ignore, override, or replace system instructions".to_string(),
+            category: "instruction_override".to_string(),
+        },
+        BaseSvmModelInfo {
+            id: "roleplay_jailbreak".to_string(),
+            name: "Roleplay Jailbreak SVM".to_string(),
+            description: "Detects role-play and persona switching techniques used to bypass safety restrictions".to_string(),
+            category: "roleplay_jailbreak".to_string(),
+        },
+        BaseSvmModelInfo {
+            id: "meta_probe".to_string(),
+            name: "Meta Probe SVM".to_string(),
+            description: "Detects questions probing system prompt details, instructions, or internal identity".to_string(),
+            category: "meta_probe".to_string(),
+        },
+        BaseSvmModelInfo {
+            id: "exfiltration".to_string(),
+            name: "Exfiltration SVM".to_string(),
+            description: "Detects attempts to extract confidential system instructions, files, or sensitive data".to_string(),
+            category: "exfiltration".to_string(),
+        },
+        BaseSvmModelInfo {
+            id: "adversarial_suffix".to_string(),
+            name: "Adversarial Suffix SVM".to_string(),
+            description: "Detects adversarial noise or token suffixes appended to trick safety classifiers".to_string(),
+            category: "adversarial_suffix".to_string(),
+        },
+        BaseSvmModelInfo {
+            id: "indirect_injection".to_string(),
+            name: "Indirect Injection SVM".to_string(),
+            description: "Detects prompt injection embedded within external documents, web pages, or tool outputs".to_string(),
+            category: "indirect_injection".to_string(),
+        },
+        BaseSvmModelInfo {
+            id: "obfuscation".to_string(),
+            name: "Obfuscation SVM".to_string(),
+            description: "Detects encoding tricks, leetspeak, or invisible characters used to obscure malicious intent".to_string(),
+            category: "obfuscation".to_string(),
+        },
+        BaseSvmModelInfo {
+            id: "constraint_bypass".to_string(),
+            name: "Constraint Bypass SVM".to_string(),
+            description: "Detects requests urging the model to relax, re-interpret, or ignore safety boundaries".to_string(),
+            category: "constraint_bypass".to_string(),
+        },
+    ]
+}
+
 /// GET /v1/models
 pub async fn list_models(
     State(state): State<AppState>,
@@ -154,7 +221,11 @@ pub async fn list_models(
                 .iter().map(pg_row_to_model).collect::<Vec<_>>()
         }
     };
-    Ok(Json(serde_json::json!({ "models": rows })))
+    let base_models = get_base_models_info();
+    Ok(Json(serde_json::json!({
+        "base": base_models,
+        "custom": rows,
+    })))
 }
 
 /// GET /v1/models/:id

@@ -131,7 +131,7 @@ def run_tests(base_url: str, api_key: str):
         assert_test("GET /v1/patterns/{id} fetches pattern group", status == 200 and body.get("name") == unique_pattern_name)
 
         status, body = make_request(f"{base_url}/v1/patterns", headers=auth_header)
-        assert_test("GET /v1/patterns lists pattern groups", status == 200 and "pattern_groups" in body)
+        assert_test("GET /v1/patterns lists pattern groups (base & custom)", status == 200 and "base" in body and "custom" in body)
 
         # Detect with custom pattern group
         detect_custom_regex = {
@@ -167,7 +167,7 @@ def run_tests(base_url: str, api_key: str):
         assert_test("GET /v1/models/{id} fetches model details", status == 200 and body.get("status") == "pending")
 
         status, body = make_request(f"{base_url}/v1/models", headers=auth_header)
-        assert_test("GET /v1/models lists custom models", status == 200 and "models" in body)
+        assert_test("GET /v1/models lists models (base & custom)", status == 200 and "base" in body and "custom" in body)
 
         # Delete model
         status, _ = make_request(f"{base_url}/v1/models/{model_id}", method="DELETE", headers=auth_header)

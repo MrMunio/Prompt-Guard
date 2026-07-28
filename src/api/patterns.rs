@@ -225,6 +225,67 @@ pub async fn create_pattern_group(
     Ok((axum::http::StatusCode::CREATED, Json(resp_json)))
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct BaseRegexGroupInfo {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub category: String,
+}
+
+pub fn get_base_patterns_info() -> Vec<BaseRegexGroupInfo> {
+    vec![
+        BaseRegexGroupInfo {
+            id: "exfiltration".to_string(),
+            name: "Data Exfiltration Regex Patterns".to_string(),
+            description: "Built-in regex rules detecting secret leakage, prompt exfiltration, and system prompt extract triggers".to_string(),
+            category: "exfiltration".to_string(),
+        },
+        BaseRegexGroupInfo {
+            id: "instruction_override".to_string(),
+            name: "Instruction Override Regex Patterns".to_string(),
+            description: "Built-in regex rules detecting directive resets and system prompt overrides".to_string(),
+            category: "instruction_override".to_string(),
+        },
+        BaseRegexGroupInfo {
+            id: "roleplay_jailbreak".to_string(),
+            name: "Roleplay Jailbreak Regex Patterns".to_string(),
+            description: "Built-in regex rules detecting DAN and persona switching string signatures".to_string(),
+            category: "roleplay_jailbreak".to_string(),
+        },
+        BaseRegexGroupInfo {
+            id: "meta_probe".to_string(),
+            name: "Meta Probe Regex Patterns".to_string(),
+            description: "Built-in regex rules targeting internal system prompt probing queries".to_string(),
+            category: "meta_probe".to_string(),
+        },
+        BaseRegexGroupInfo {
+            id: "obfuscation".to_string(),
+            name: "Obfuscation Regex Patterns".to_string(),
+            description: "Built-in regex rules detecting encoded payloads and zero-width characters".to_string(),
+            category: "obfuscation".to_string(),
+        },
+        BaseRegexGroupInfo {
+            id: "indirect_injection".to_string(),
+            name: "Indirect Injection Regex Patterns".to_string(),
+            description: "Built-in regex rules detecting marker patterns inside retrieved context".to_string(),
+            category: "indirect_injection".to_string(),
+        },
+        BaseRegexGroupInfo {
+            id: "constraint_bypass".to_string(),
+            name: "Constraint Bypass Regex Patterns".to_string(),
+            description: "Built-in regex rules detecting policy relaxation triggers".to_string(),
+            category: "constraint_bypass".to_string(),
+        },
+        BaseRegexGroupInfo {
+            id: "adversarial_suffix".to_string(),
+            name: "Adversarial Suffix Regex Patterns".to_string(),
+            description: "Built-in regex rules detecting known adversarial token sequences".to_string(),
+            category: "adversarial_suffix".to_string(),
+        },
+    ]
+}
+
 /// GET /v1/patterns
 pub async fn list_pattern_groups(
     State(state): State<AppState>,
@@ -246,7 +307,11 @@ pub async fn list_pattern_groups(
     for id in &group_ids {
         groups.push(load_pattern_group_response(id, &state.db).await?);
     }
-    Ok(Json(serde_json::json!({ "pattern_groups": groups })))
+    let base_patterns = get_base_patterns_info();
+    Ok(Json(serde_json::json!({
+        "base": base_patterns,
+        "custom": groups,
+    })))
 }
 
 /// GET /v1/patterns/:id
