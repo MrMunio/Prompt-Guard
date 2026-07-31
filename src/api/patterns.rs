@@ -77,7 +77,10 @@ pub struct PatternGroupResponse {
 #[derive(Debug, Serialize)]
 pub struct PatternEntryResponse {
     pub id: String,
+    pub raw_input: String,
     pub pattern: String,
+    /// "user_regex" | "llm_generated"
+    pub source: String,
     pub created_at: String,
 }
 
@@ -150,13 +153,14 @@ pub async fn create_pattern_group(
     }
 
     // Determine which inputs are regex and which need LLM generation.
-    let mut patterns: Vec<String> = Vec::new();
+    // Each entry is (pattern, source) where source is "user_regex" or "llm_generated".
+    let mut patterns: Vec<(String, &'static str)> = Vec::new();
     let mut needs_llm: Vec<String> = Vec::new();
     let mut llm_used = false;
 
     for input in &req.input {
         if compile_pattern(input).is_ok() {
-            patterns.push(input.clone());
+            patterns.push((input.clone(), "user_regex"));
         } else {
             needs_llm.push(input.clone());
         }
@@ -169,17 +173,19 @@ pub async fn create_pattern_group(
             match generate_regex_via_llm(desc, &state).await {
                 Ok(generated) => {
                     llm_used = true;
-                    patterns.extend(generated);
+                    for p in generated {
+                        patterns.push((p, "llm_generated"));
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(description = desc, error = %e, "LLM regex generation failed — storing description as literal pattern");
-                    patterns.push(regex::escape(desc));
+                    patterns.push((regex::escape(desc), "user_regex"));
                 }
             }
         } else {
             // LLM opt-in not set: regex-escape the plain-text input and store as literal.
             tracing::debug!(description = desc, "use_llm=false — storing plain-text input as escaped literal pattern");
-            patterns.push(regex::escape(desc));
+            patterns.push((regex::escape(desc), "user_regex"));
         }
     }
 
@@ -208,9 +214,9 @@ pub async fn create_pattern_group(
         }
     }
 
-    // Insert each pattern entry.
-    for pattern in &patterns {
-        insert_pattern_entry(&group_id, pattern, &state.db, &now).await?;
+    // Insert each pattern entry with its correct source.
+    for (pattern, source) in &patterns {
+        insert_pattern_entry(&group_id, pattern, source, &state.db, &now).await?;
     }
 
     // Invalidate custom regex cache for this group.
@@ -399,31 +405,34 @@ pub async fn add_pattern_entries(
 ) -> Result<impl IntoResponse, ApiError> {
     let _ = load_pattern_group_response(&id, &state.db).await?; // 404 check
 
-    let mut patterns: Vec<String> = Vec::new();
+    // Each entry is (pattern, source) where source is "user_regex" or "llm_generated".
+    let mut patterns: Vec<(String, &'static str)> = Vec::new();
     let mut llm_used = false;
     for input in &req.input {
         if compile_pattern(input).is_ok() {
-            patterns.push(input.clone());
+            patterns.push((input.clone(), "user_regex"));
         } else if req.use_llm {
             match generate_regex_via_llm(input, &state).await {
                 Ok(generated) => {
                     llm_used = true;
-                    patterns.extend(generated);
+                    for p in generated {
+                        patterns.push((p, "llm_generated"));
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(description = input, error = %e, "LLM regex generation failed — storing description as literal pattern");
-                    patterns.push(regex::escape(input));
+                    patterns.push((regex::escape(input), "user_regex"));
                 }
             }
         } else {
             tracing::debug!(description = input, "use_llm=false — storing plain-text input as escaped literal pattern");
-            patterns.push(regex::escape(input));
+            patterns.push((regex::escape(input), "user_regex"));
         }
     }
 
     let now = Utc::now().to_rfc3339();
-    for pattern in &patterns {
-        insert_pattern_entry(&id, pattern, &state.db, &now).await?;
+    for (pattern, source) in &patterns {
+        insert_pattern_entry(&id, pattern, source, &state.db, &now).await?;
     }
 
     state.engine.regex_custom_cache.evict(&id).await;
@@ -462,6 +471,7 @@ pub async fn delete_pattern_entry(
 async fn insert_pattern_entry(
     group_id: &str,
     pattern: &str,
+    source: &str,
     db: &DbPool,
     now: &str,
 ) -> Result<String, ApiError> {
@@ -469,14 +479,14 @@ async fn insert_pattern_entry(
     match db {
         DbPool::Sqlite(pool) => {
             sqlx::query(
-                "INSERT INTO pattern_entries (id, group_id, raw_input, pattern, source, created_at) VALUES (?, ?, ?, ?, 'user_regex', ?)"
-            ).bind(&entry_id).bind(group_id).bind(pattern).bind(pattern).bind(now)
+                "INSERT INTO pattern_entries (id, group_id, raw_input, pattern, source, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+            ).bind(&entry_id).bind(group_id).bind(pattern).bind(pattern).bind(source).bind(now)
              .execute(pool).await?;
         }
         DbPool::Postgres(pool) => {
             sqlx::query(
-                "INSERT INTO pattern_entries (id, group_id, raw_input, pattern, source, created_at) VALUES ($1, $2, $3, $4, 'user_regex', $5)"
-            ).bind(&entry_id).bind(group_id).bind(pattern).bind(pattern).bind(now)
+                "INSERT INTO pattern_entries (id, group_id, raw_input, pattern, source, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
+            ).bind(&entry_id).bind(group_id).bind(pattern).bind(pattern).bind(source).bind(now)
              .execute(pool).await?;
         }
     }
@@ -512,21 +522,25 @@ pub async fn load_pattern_group_response(
     let entries: Vec<PatternEntryResponse> = match db {
         DbPool::Sqlite(pool) => {
             sqlx::query(
-                "SELECT id, pattern, created_at FROM pattern_entries WHERE group_id = ? ORDER BY created_at"
+                "SELECT id, raw_input, pattern, source, created_at FROM pattern_entries WHERE group_id = ? ORDER BY created_at"
             ).bind(group_id).fetch_all(pool).await?
              .iter().map(|r| PatternEntryResponse {
                  id: r.get("id"),
+                 raw_input: r.get::<Option<String>, _>("raw_input").unwrap_or_else(|| r.get("pattern")),
                  pattern: r.get("pattern"),
+                 source: r.get("source"),
                  created_at: r.get("created_at"),
              }).collect()
         }
         DbPool::Postgres(pool) => {
             sqlx::query(
-                "SELECT id, pattern, created_at FROM pattern_entries WHERE group_id = $1 ORDER BY created_at"
+                "SELECT id, raw_input, pattern, source, created_at FROM pattern_entries WHERE group_id = $1 ORDER BY created_at"
             ).bind(group_id).fetch_all(pool).await?
              .iter().map(|r| PatternEntryResponse {
                  id: r.get("id"),
+                 raw_input: r.get::<Option<String>, _>("raw_input").unwrap_or_else(|| r.get("pattern")),
                  pattern: r.get("pattern"),
+                 source: r.get("source"),
                  created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at").to_rfc3339(),
              }).collect()
         }

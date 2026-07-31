@@ -276,6 +276,8 @@ Content-Type: application/json
 }
 ```
 
+> **Note on `source`:** Each entry includes a `source` field indicating whether the regex was user-supplied (`"user_regex"`) or generated via LLM (`"llm_generated"`).
+
 ### 4.2 List Pattern Groups
 
 ```http
@@ -307,7 +309,31 @@ X-API-Key: <key>
       "name": "Competitor Mention Block",
       "description": "Blocks references to competitor products",
       "category": "exfiltration",
-      "entries": [...]
+      "entries": [
+        {
+          "id": "1108111f-2d50-4593-9dc9-b64eb55361ca",
+          "raw_input": "(?i)acme\\s+cloud",
+          "pattern": "(?i)acme\\s+cloud",
+          "source": "user_regex",
+          "created_at": "2026-07-28T09:07:15.556604400+00:00"
+        },
+        {
+          "id": "0919ef9a-68fb-4220-870a-288d706223fc",
+          "raw_input": "RivalCorp",
+          "pattern": "(?i)RivalCorp",
+          "source": "user_regex",
+          "created_at": "2026-07-28T09:07:15.556604400+00:00"
+        },
+        {
+          "id": "4e7a2b91-11c2-480f-90e1-7a6b8c9d0e1f",
+          "raw_input": "Ignore or reset instructions",
+          "pattern": "(?i)\\b(ignore|reset)\\s+all\\s+instructions\\b",
+          "source": "llm_generated",
+          "created_at": "2026-07-28T09:10:02.123456700+00:00"
+        }
+      ],
+      "created_at": "2026-07-28T09:07:15.556604400+00:00",
+      "updated_at": "2026-07-28T09:07:15.556604400+00:00"
     }
   ]
 }
